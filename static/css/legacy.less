@@ -30,7 +30,6 @@
 
 @import (less) "components/read-panel.less";
 @import (less) "components/diff.less";
-@import (less) "components/iconochive.less";
 @import (less) "components/carousel.less";
 @import (less) "components/editions.less";
 @import (less) "components/header.less";
@@ -134,7 +133,7 @@ table {
       margin-left: 10px;
     }
   }
-  // openlibrary/templates/lib/markdown.html
+  // https://openlibrary.org/help/markdown
   &.help {
     margin: 20px 0;
     border-top: 1px solid @grey-e7e7e7;
@@ -211,8 +210,7 @@ q {
   }
 }
 
-abbr,
-acronym {
+abbr {
   border: 0;
   font-variant: normal;
 }
@@ -229,20 +227,12 @@ em {
   font-style: italic;
 }
 
-#contentBody,
-#contentMeta,
-.floaterBody {
-  ol,
-  ul {
-    margin-left: .5em;
-    margin-right: .5em;
-  }
-}
-
 #contentBody {
   ul,
   ol {
     margin-bottom: 20px;
+    margin-left: .5em;
+    margin-right: .5em;
   }
   li,
   blockquote {
@@ -256,19 +246,6 @@ em {
     padding: 0 !important;
     position: relative;
   }
-}
-
-#contentBody,
-#contentMeta {
-  .tabs ul {
-    margin-left: 0;
-  }
-}
-
-#content,
-#contentBody,
-#contentMeta,
-.floaterBody {
   ol li {
     list-style: decimal;
     color: @dark-grey;
@@ -485,15 +462,6 @@ p {
   }
 }
 
-.print-disabled-download {
-  a {
-    flex: 1;
-  }
-  display: flex;
-  font-size: 10px;
-  align-items: center;
-}
-
 input[type=text],
 select,
 textarea {
@@ -503,14 +471,14 @@ textarea {
 }
 
 input {
-  &[type=text] {
+  &[type=text], &[type=email] {
     margin: 0 10px 5px 0;
   }
   &.repeat-add {
     font-size: 1.125em;
   }
   &.invalid {
-    border: 1px solid @red;
+    border-color: @red;
     color: @dark-grey;
   }
   &.highlight {
@@ -529,23 +497,6 @@ input {
   margin-bottom: 10px;
   color: @grey;
   font-size: .9em;
-}
-
-// openlibrary/macros/FulltextSnippet.html
-.fulltext-excerpt {
-  padding: 10px;
-  border-bottom: 1px solid @lightest-grey;
-  font-size: .8em;
-  overflow: hidden;
-  &:last-child {
-    border-bottom: none;
-  }
-}
-
-// openlibrary/templates/work_search.html
-.advanced-search {
-  font-size: 12px;
-  float: right;
 }
 
 /* Search v2 */
@@ -618,7 +569,6 @@ div#content {
 
 // openlibrary/templates/account/create.html
 // openlibrary/templates/account/email/forgot-ia.html
-// openlibrary/templates/account/email/forgot.html
 // openlibrary/templates/form.html
 // openlibrary/templates/login.html
 // openlibrary/templates/merge/authors.html
@@ -785,11 +735,6 @@ div.siteSearch {
   }
 }
 
-// possibly unused
-input.query {
-  width: 205px;
-}
-
 // openlibrary/templates/lists/home.html
 // openlibrary/templates/search/advancedsearch.html
 // openlibrary/templates/search/authors.html
@@ -819,7 +764,6 @@ input.query {
 /* DIALOGS */
 
 // openlibrary/macros/EditButtons.html
-// openlibrary/macros/EditButtonsMacros.html
 div.cclicense {
   font-family: @lucida_sans_serif-2;
   font-size: .75em;
@@ -878,7 +822,6 @@ div.verify {
 }
 
 // openlibrary/templates/account/email/forgot-ia.html
-// openlibrary/templates/account/email/forgot.html
 .defaultstyling {
   font-family: @lucida_sans_serif-1;
   .padtop {
@@ -886,12 +829,6 @@ div.verify {
   }
 }
 
-// openlibrary/templates/account/email/forgot.html
-hr.forgot-padding {
-  margin: 30px 0 15px;
-}
-
-// openlibrary/templates/account/email/forgot.html
 // openlibrary/templates/account/email/forgot-ia.html
 .forgot-email {
   font-size: .8em;
@@ -913,12 +850,6 @@ hr.forgot-padding {
 
 /* LANGUAGE DROPDOWN */
 @import (less) "components/language.less";
-
-/* CONTENT */
-div.contentWide,
-div#contentMeta {
-  padding: 10px 20px 20px;
-}
 
 @import (less) "components/link-box.less";
 
@@ -1422,7 +1353,6 @@ ul {
 @import (less) "components/page-history.less";
 
 // openlibrary/macros/CoverImage.html
-// openlibrary/macros/SRPCoverImage.html
 // openlibrary/templates/covers/book_cover.html
 // openlibrary/templates/covers/book_cover_single_edition.html
 .BookTitle {
@@ -1439,7 +1369,6 @@ ul {
   line-height: normal;
 }
 
-// openlibrary/macros/SRPCoverImage.html
 // openlibrary/templates/covers/book_cover.html
 // openlibrary/templates/covers/book_cover_single_edition.html
 .Author {
@@ -1449,7 +1378,6 @@ ul {
   font-size: 11px;
 }
 
-// openlibrary/macros/SearchResults.html
 // openlibrary/macros/SearchResultsWork.html
 // openlibrary/templates/books/show.html
 // openlibrary/templates/books/works-show.html
@@ -1533,13 +1461,11 @@ span.actions {
 // openlibrary/templates/work_search.html
 // openlibrary/templates/books/check.html
 // openlibrary/templates/account/books.html
-// openlibrary/macros/SearchResults.html
 // openlibrary/macros/FulltextResults.html
 ul.list-books {
   > li {
     .display-flex();
   }
-  // openlibrary/macros/SearchResults.html
   // openlibrary/macros/SearchResultsWork.html
   // openlibrary/templates/books/check.html
   // openlibrary/templates/books/show.html
@@ -1556,7 +1482,6 @@ ul.list-books {
   }
 
   // `span.resultTitle .bookauthor` is used in:
-  // * openlibrary/macros/SearchResults.html
   // * openlibrary/macros/SearchResultsWork.html
   // `span.resultPublisher` is used in
   // * openlibrary/macros/SearchResultsWork.htm
@@ -1573,11 +1498,9 @@ ul.list-books {
   // openlibrary/templates/books/show.html
   // openlibrary/templates/books/check.html
   // openlibrary/macros/SearchResultsWork.html
-  // openlibrary/macros/SearchResults.html
   span.resultPublisher {
     display: block;
   }
-  // openlibrary/macros/SearchResults.html
   // openlibrary/templates/books/show.html
   span.resultType {
     font-size: .6875em;
@@ -1843,7 +1766,6 @@ div#subjectLists {
 // openlibrary/templates/account/privacy.html
 // openlibrary/templates/account.html
 .account-settings-menu {
-  margin-bottom: 15px;
   display: flex;
 }
 
@@ -1876,13 +1798,6 @@ div#subjectLists {
   * - /search/subjects
   * To be deleted in https://github.com/internetarchive/openlibrary/issues/1821
   */
-  div.contentWide,
-  div#contentMeta {
-    float: left;
-    clear: both;
-    width: 918px;
-    padding: 10px 20px 20px;
-  }
   .desktop-only {
     display: inherit;
   }

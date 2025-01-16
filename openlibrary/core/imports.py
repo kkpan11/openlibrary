@@ -1,37 +1,47 @@
 """Interface to import queue.
 """
+
+import contextlib
+import datetime
+import json
+import logging
+import time
 from collections import defaultdict
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Final
 
-import logging
-import datetime
-import time
 import web
-import json
-
 from psycopg2.errors import UndefinedTable, UniqueViolation
 from pydantic import ValidationError
 from web.db import ResultSet
-from web.utils import Storage
 
-from . import db
-
-import contextlib
 from openlibrary.catalog import add_book
 from openlibrary.core import cache
 
+from . import db
+
 logger = logging.getLogger("openlibrary.imports")
 
-STAGED_SOURCES: Final = ('amazon', 'idb')
+STAGED_SOURCES: Final = ('amazon', 'idb', 'google_books')
 
 if TYPE_CHECKING:
     from openlibrary.core.models import Edition
 
 
 class Batch(web.storage):
+
+    def __init__(self, mapping, *requireds, **defaults):
+        """
+        Initialize some statistics instance attributes yet retain web.storage's __init__ method.
+        """
+        super().__init__(mapping, *requireds, **defaults)
+        self.total_submitted: int = 0
+        self.total_queued: int = 0
+        self.total_skipped: int = 0
+        self.items_skipped: set = set()
+
     @staticmethod
-    def find(name, create=False):
+    def find(name: str, create: bool = False) -> "Batch":  # type: ignore[return]
         result = db.query("SELECT * FROM import_batch where name=$name", vars=locals())
         if result:
             return Batch(result[0])
@@ -39,8 +49,8 @@ class Batch(web.storage):
             return Batch.new(name)
 
     @staticmethod
-    def new(name):
-        db.insert("import_batch", name=name)
+    def new(name: str, submitter: str | None = None) -> "Batch":
+        db.insert("import_batch", name=name, submitter=submitter)
         return Batch.find(name=name)
 
     def load_items(self, filename):
@@ -63,22 +73,36 @@ class Batch(web.storage):
             self.name,
             len(already_present),
         )
+
+        # Update batch counts
+        self.total_submitted = len(ia_ids)
+        self.total_skipped = len(already_present)
+        self.total_queued = self.total_submitted - self.total_skipped
+        self.items_skipped = already_present
+
         # Those unique items whose ia_id's aren't already present
         return [item for item in items if item.get('ia_id') not in already_present]
 
     def normalize_items(self, items):
         return [
-            {'batch_id': self.id, 'ia_id': item}
-            if isinstance(item, str)
-            else {
-                'batch_id': self.id,
-                # Partner bots set ia_id to eg "partner:978..."
-                'ia_id': item.get('ia_id'),
-                'status': item.get('status', 'pending'),
-                'data': json.dumps(item.get('data'), sort_keys=True)
-                if item.get('data')
-                else None,
-            }
+            (
+                {'batch_id': self.id, 'ia_id': item}
+                if isinstance(item, str)
+                else {
+                    'batch_id': self.id,
+                    # Partner bots set ia_id to eg "partner:978..."
+                    'ia_id': item.get('ia_id'),
+                    'status': item.get('status', 'pending'),
+                    'data': (
+                        json.dumps(item.get('data'), sort_keys=True)
+                        if item.get('data')
+                        else None
+                    ),
+                    'submitter': (
+                        item.get('submitter') if item.get('submitter') else None
+                    ),
+                }
+            )
             for item in items
         ]
 
@@ -90,7 +114,7 @@ class Batch(web.storage):
             i.e. of a format id_type:value which cannot be a valid IA id.
         """
         if not items:
-            return
+            return None
 
         logger.info("batch %s: adding %d items", self.name, len(items))
 
@@ -108,7 +132,7 @@ class Batch(web.storage):
 
             logger.info("batch %s: added %d items", self.name, len(items))
 
-        return
+        return None
 
     def get_items(self, status="pending"):
         result = db.where("import_item", batch_id=self.id, status=status)

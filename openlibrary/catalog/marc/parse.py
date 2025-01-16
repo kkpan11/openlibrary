@@ -1,14 +1,15 @@
+import logging
 import re
-from typing import Any
 from collections.abc import Callable
+from typing import Any
 
 from openlibrary.catalog.marc.get_subjects import subjects_for_work
 from openlibrary.catalog.marc.marc_base import (
-    MarcBase,
-    MarcFieldBase,
     BadMARC,
-    NoTitle,
+    MarcBase,
     MarcException,
+    MarcFieldBase,
+    NoTitle,
 )
 from openlibrary.catalog.utils import (
     pick_first_date,
@@ -18,6 +19,7 @@ from openlibrary.catalog.utils import (
 )
 
 DNB_AGENCY_CODE = 'DE-101'
+logger = logging.getLogger('openlibrary.catalog.marc')
 max_number_of_pages = 50000  # no monograph should be longer than 50,000 pages
 re_bad_char = re.compile('\ufffd')
 re_date = re.compile(r'^[0-9]+u*$')
@@ -27,7 +29,6 @@ re_oclc = re.compile(r'^\(OCoLC\).*?0*(\d+)')
 re_ocolc = re.compile('^ocolc *$', re.I)
 re_ocn_or_ocm = re.compile(r'^oc[nm]0*(\d+) *$')
 re_int = re.compile(r'\d{2,}')
-re_number_dot = re.compile(r'\d{3,}\.$')
 re_bracket_field = re.compile(r'^\s*(\[.*\])\.?\s*$')
 
 
@@ -280,14 +281,41 @@ lang_map = {
     'end': 'eng',
     'enk': 'eng',
     'ent': 'eng',
-    'cro': 'chu',
     'jap': 'jpn',
     'fra': 'fre',
-    'gwr': 'ger',
-    'sze': 'slo',
-    'fr ': 'fre',
     'fle': 'dut',  # Flemish -> Dutch
+    # 2 character to 3 character codes
+    'fr ': 'fre',
     'it ': 'ita',
+    # LOC MARC Deprecated code updates
+    # Only covers deprecated codes where there
+    # is a direct 1-to-1 mapping to a single new code.
+    'cam': 'khm',  # Khmer
+    'esp': 'epo',  # Esperanto
+    'eth': 'gez',  # Ethiopic
+    'far': 'fao',  # Faroese
+    'fri': 'fry',  # Frisian
+    'gae': 'gla',  # Scottish Gaelic
+    'gag': 'glg',  # Galician
+    'gal': 'orm',  # Oromo
+    'gua': 'grn',  # Guarani
+    'int': 'ina',  # Interlingua (International Auxiliary Language Association)
+    'iri': 'gle',  # Irish
+    'lan': 'oci',  # Occitan (post 1500)
+    'lap': 'smi',  # Sami
+    'mla': 'mlg',  # Malagasy
+    'mol': 'rum',  # Romanian
+    'sao': 'smo',  # Samoan
+    'scc': 'srp',  # Serbian
+    'scr': 'hrv',  # Croatian
+    'sho': 'sna',  # Shona
+    'snh': 'sin',  # Sinhalese
+    'sso': 'sot',  # Sotho
+    'swz': 'ssw',  # Swazi
+    'tag': 'tgl',  # Tagalog
+    'taj': 'tgk',  # Tajik
+    'tar': 'tat',  # Tatar
+    'tsw': 'tsn',  # Tswana
 }
 
 
@@ -311,10 +339,10 @@ def read_languages(rec: MarcBase, lang_008: str | None = None) -> list[str]:
     for f in rec.get_fields('041'):
         if f.ind2() == '7':
             code_source = ' '.join(f.get_subfield_values('2'))
-            # TODO: What's the best way to handle these?
-            raise MarcException("Non-MARC language code(s), source = ", code_source)
+            logger.error(f'Unrecognised language source = {code_source}')
             continue  # Skip anything which is using a non-MARC code source e.g. iso639-1
         for value in f.get_subfield_values('a'):
+            value = value.replace(' ', '').replace('-', '')  # remove pad/separators
             if len(value) % 3 == 0:
                 # Obsolete cataloging practice was to concatenate all language codes in a single subfield
                 for k in range(0, len(value), 3):
@@ -322,7 +350,7 @@ def read_languages(rec: MarcBase, lang_008: str | None = None) -> list[str]:
                     if code != 'zxx' and code not in found:
                         found.append(code)
             else:
-                raise MarcException("Got non-multiple of three language code")
+                logger.error(f'Unrecognised MARC language code(s) = {value}')
     return [lang_map.get(code, code) for code in found]
 
 
@@ -349,7 +377,13 @@ def read_publisher(rec: MarcBase) -> dict[str, Any] | None:
         return name
 
     def publish_place(s: str) -> str:
-        place = s.strip(' /.,;:[')
+        place = s.strip(' /.,;:')
+        # remove encompassing []
+        if (place[0], place[-1]) == ('[', ']'):
+            place = place[1:-1]
+        # clear unbalanced []
+        if place.count('[') != place.count(']'):
+            place = place.strip('[]')
         if place.lower().startswith('s.l'):  # Sine loco
             place = '[s.l.]'
         return place
@@ -399,10 +433,6 @@ def read_author_person(field: MarcFieldBase, tag: str = '100') -> dict | None:
         return None
     if 'd' in contents:
         author = pick_first_date(strip_foc(d).strip(',[]') for d in contents['d'])
-        if 'death_date' in author and author['death_date']:
-            death_date = author['death_date']
-            if re_number_dot.search(death_date):
-                author['death_date'] = death_date[:-1]
     author['name'] = name_from_list(field.get_subfield_values('abc'))
     author['entity_type'] = 'person'
     subfields = [
