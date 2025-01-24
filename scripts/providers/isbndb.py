@@ -1,11 +1,11 @@
-import re
 import json
 import logging
 import os
-from typing import Any, Final
-import requests
-
+import re
 from json import JSONDecodeError
+from typing import Any, Final
+
+import requests
 
 from openlibrary.config import load_config
 from openlibrary.core.imports import Batch
@@ -71,7 +71,7 @@ class ISBNdb:
         self.languages = self._get_languages(data)
         self.source_records = [self.source_id]
         self.subjects = [
-            subject.capitalize() for subject in data.get('subjects', '') if subject
+            subject.capitalize() for subject in (data.get('subjects') or []) if subject
         ]
         self.binding = data.get('binding', '')
 

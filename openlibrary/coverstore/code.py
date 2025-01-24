@@ -4,27 +4,27 @@ import io
 import json
 import logging
 import os
-
-import requests
-
-import web
-
-from PIL import Image, ImageDraw, ImageFont
 import textwrap
 
+import requests
+import web
+from PIL import Image, ImageDraw, ImageFont
 
 from openlibrary.coverstore import config, db
 from openlibrary.coverstore.coverlib import read_file, read_image, save_image
+from openlibrary.coverstore.server import load_config
 from openlibrary.coverstore.utils import (
     changequery,
     download,
     ol_get,
     ol_things,
-    random_string,
-    rm_f,
     safeint,
 )
 from openlibrary.plugins.openlibrary.processors import CORSProcessor
+from openlibrary.plugins.upstream.utils import setup_requests
+
+if coverstore_config := os.getenv('COVERSTORE_CONFIG'):
+    load_config(coverstore_config)
 
 logger = logging.getLogger("coverstore")
 
@@ -73,15 +73,14 @@ def _query(category, key, value):
         if category in prefixes:
             olkey = prefixes[category] + value
             return get_cover_id([olkey])
-    else:
-        if category == 'b':
-            if key == 'isbn':
-                value = value.replace("-", "").strip()
-                key = "isbn_"
-            if key == 'oclc':
-                key = 'oclc_numbers'
-            olkeys = ol_things(key, value)
-            return get_cover_id(olkeys)
+    elif category == 'b':
+        if key == 'isbn':
+            value = value.replace("-", "").strip()
+            key = "isbn_"
+        if key == 'oclc':
+            key = 'oclc_numbers'
+        olkeys = ol_things(key, value)
+        return get_cover_id(olkeys)
     return None
 
 
@@ -210,7 +209,7 @@ def trim_microsecond(date):
 
 
 # Number of images stored in one archive.org item
-IMAGES_PER_ITEM = 10000
+IMAGES_PER_ITEM = 10_000
 
 
 def zipview_url_from_id(coverid, size):
@@ -255,25 +254,14 @@ class cover:
         elif key != 'id':
             value = self.query(category, key, value)
 
-        if not value or (value and safeint(value) in config.blocked_covers):
+        value = safeint(value)
+        if value is None or value in config.blocked_covers:
             return notfound()
 
         # redirect to archive.org cluster for large size and original images whenever possible
         if size in ("L", "") and self.is_cover_in_cluster(value):
-            url = zipview_url_from_id(int(value), size)
+            url = zipview_url_from_id(value, size)
             return web.found(url)
-
-        # covers_0008 batches [_00, _82] are tar'd / zip'd in archive.org items
-        if isinstance(value, int) or value.isnumeric():  # noqa: SIM102
-            if 8_820_000 > int(value) >= 8_000_000:
-                prefix = f"{size.lower()}_" if size else ""
-                pid = "%010d" % int(value)
-                item_id = f"{prefix}covers_{pid[:4]}"
-                item_tar = f"{prefix}covers_{pid[:4]}_{pid[4:6]}.tar"
-                item_file = f"{pid}{'-' + size.upper() if size else ''}"
-                path = f"{item_id}/{item_tar}/{item_file}.jpg"
-                protocol = web.ctx.protocol
-                return web.found(f"{protocol}://archive.org/download/{path}")
 
         d = self.get_details(value, size.lower())
         if not d:
@@ -297,7 +285,7 @@ class cover:
         try:
             from openlibrary.coverstore import archive
 
-            if d.id >= 8_820_000 and d.uploaded and '.zip' in d.filename:
+            if d.id >= 8_000_000 and d.uploaded:
                 return web.found(
                     archive.Cover.get_cover_url(
                         d.id, size=size, protocol=web.ctx.protocol
@@ -329,14 +317,9 @@ class cover:
             h,
         )
 
-    def get_details(self, coverid, size=""):
-        try:
-            coverid = int(coverid)
-        except ValueError:
-            return None
-
+    def get_details(self, coverid: int, size=""):
         # Use tar index if available to avoid db query. We have 0-6M images in tar balls.
-        if isinstance(coverid, int) and coverid < 6000000 and size in "sml":
+        if coverid < 6000000 and size in "sml":
             path = self.get_tar_filename(coverid, size)
 
             if path:
@@ -350,12 +333,12 @@ class cover:
 
         return db.details(coverid)
 
-    def is_cover_in_cluster(self, coverid):
+    def is_cover_in_cluster(self, coverid: int):
         """Returns True if the cover is moved to archive.org cluster.
         It is found by looking at the config variable max_coveritem_index.
         """
         try:
-            return int(coverid) < IMAGES_PER_ITEM * config.get("max_coveritem_index", 0)
+            return coverid < IMAGES_PER_ITEM * config.get("max_coveritem_index", 0)
         except (TypeError, ValueError):
             return False
 
@@ -449,8 +432,7 @@ class query:
         limit = safeint(i.limit, 10)
         details = i.details.lower() == "true"
 
-        if limit > 100:
-            limit = 100
+        limit = min(limit, 100)
 
         if i.olid and ',' in i.olid:
             i.olid = i.olid.split(',')
@@ -543,32 +525,11 @@ def render_list_preview_image(lst_key):
             image.append(img)
     max_height = 0
     for img in image:
-        if img.size[1] > max_height:
-            max_height = img.size[1]
-    if len(image) == 5:
-        background.paste(image[0], (63, 174 + max_height - image[0].size[1]))
-        background.paste(image[1], (247, 174 + max_height - image[1].size[1]))
-        background.paste(image[2], (431, 174 + max_height - image[2].size[1]))
-        background.paste(image[3], (615, 174 + max_height - image[3].size[1]))
-        background.paste(image[4], (799, 174 + max_height - image[4].size[1]))
-
-    elif len(image) == 4:
-        background.paste(image[0], (155, 174 + max_height - image[0].size[1]))
-        background.paste(image[1], (339, 174 + max_height - image[1].size[1]))
-        background.paste(image[2], (523, 174 + max_height - image[2].size[1]))
-        background.paste(image[3], (707, 174 + max_height - image[3].size[1]))
-
-    elif len(image) == 3:
-        background.paste(image[0], (247, 174 + max_height - image[0].size[1]))
-        background.paste(image[1], (431, 174 + max_height - image[1].size[1]))
-        background.paste(image[2], (615, 174 + max_height - image[2].size[1]))
-
-    elif len(image) == 2:
-        background.paste(image[0], (339, 174 + max_height - image[0].size[1]))
-        background.paste(image[1], (523, 174 + max_height - image[1].size[1]))
-
-    else:
-        background.paste(image[0], (431, 174 + max_height - image[0].size[1]))
+        max_height = max(img.size[1], max_height)
+    start_width = 63 + 92 * (5 - len(image))
+    for img in image:
+        background.paste(img, (start_width, 174 + max_height - img.size[1]))
+        start_width += 184
 
     logo = logo.resize((120, 74), Image.LANCZOS)
     background.paste(logo, (880, 14), logo)
@@ -602,3 +563,10 @@ def render_list_preview_image(lst_key):
     with io.BytesIO() as buf:
         background.save(buf, format='PNG')
         return buf.getvalue()
+
+
+def setup():
+    setup_requests(config)
+
+
+setup()

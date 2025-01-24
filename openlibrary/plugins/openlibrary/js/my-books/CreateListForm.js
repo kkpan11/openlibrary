@@ -3,6 +3,7 @@
  * creation form.
  * @module my-books/CreateListForm.js
  */
+import 'jquery-colorbox';
 import myBooksStore from './store'
 import { websafe } from '../jsdef'
 import { createList } from '../lists/ListService'
@@ -123,7 +124,7 @@ export class CreateListForm {
 
         for (const dropper of droppers) {
             const isActive = dropper === openDropper
-            dropper.readingLists.onListCreationSuccess(listKey, listTitle, coverUrl, isActive)
+            dropper.readingLists.onListCreationSuccess(listKey, listTitle, isActive, coverUrl)
         }
     }
 
