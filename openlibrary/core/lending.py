@@ -1,25 +1,30 @@
 """Module for providing core functionality of lending on Open Library.
 """
-from typing import Literal, TypedDict, cast
 
-import web
 import datetime
 import logging
 import time
 import uuid
+from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 import eventer
 import requests
+import web
+from simplejson.errors import JSONDecodeError
 
-from infogami.utils.view import public
 from infogami.utils import delegate
-from openlibrary.core import cache
+from infogami.utils.view import public
 from openlibrary.accounts.model import OpenLibraryAccount
+from openlibrary.core import cache
 from openlibrary.plugins.upstream.utils import urlencode
 from openlibrary.utils import dateutil, uniq
 
-from . import ia
 from . import helpers as h
+from . import ia
+
+if TYPE_CHECKING:
+    from openlibrary.plugins.upstream.models import Edition
+
 
 logger = logging.getLogger(__name__)
 
@@ -59,11 +64,11 @@ config_ia_s3_auth_url = None
 config_ia_ol_metadata_write_s3 = None
 config_ia_users_loan_history = None
 config_ia_loan_api_developer_key = None
-config_ia_civicrm_api = None
 config_http_request_timeout = None
 config_loanstatus_url = None
 config_bookreader_host = None
 config_internal_tests_api_key = None
+config_fts_context = None
 
 
 def setup(config):
@@ -74,7 +79,7 @@ def setup(config):
     global config_ia_availability_api_v2_url, config_ia_ol_metadata_write_s3
     global config_ia_xauth_api_url, config_http_request_timeout, config_ia_s3_auth_url
     global config_ia_users_loan_history, config_ia_loan_api_developer_key
-    global config_ia_civicrm_api, config_ia_domain
+    global config_ia_domain, config_fts_context
 
     config_loanstatus_url = config.get('loanstatus_url')
     config_bookreader_host = config.get('bookreader_host', 'archive.org')
@@ -92,9 +97,9 @@ def setup(config):
     config_ia_s3_auth_url = config.get('ia_s3_auth_url')
     config_ia_users_loan_history = config.get('ia_users_loan_history')
     config_ia_loan_api_developer_key = config.get('ia_loan_api_developer_key')
-    config_ia_civicrm_api = config.get('ia_civicrm_api')
     config_internal_tests_api_key = config.get('internal_tests_api_key')
     config_http_request_timeout = config.get('http_request_timeout')
+    config_fts_context = config.get('fts_context')
 
 
 @public
@@ -193,7 +198,10 @@ def get_groundtruth_availability(ocaid, s3_keys=None):
         response.raise_for_status()
     except requests.HTTPError:
         pass  # TODO: Handle unexpected responses from the availability server.
-    data = response.json().get('lending_status', {})
+    try:
+        data = response.json().get('lending_status', {})
+    except JSONDecodeError as e:
+        data = {}
     # For debugging
     data['__src__'] = 'core.models.lending.get_groundtruth_availability'
     return data
@@ -219,7 +227,7 @@ def s3_loan_api(s3_keys, ocaid=None, action='browse', **kwargs):
     # `www/common/Lending.inc#L111-114` needs to
     # be updated on petabox
     if response.status_code in [400, 409]:
-        raise PatronAccessException()
+        raise PatronAccessException
     response.raise_for_status()
     return response
 
@@ -453,10 +461,11 @@ def get_ocaid(item: dict) -> str | None:
         possible_fields.remove('ia')
         possible_fields.append('ia')
 
-    ocaids = []
+    ocaids: list[str] = []
     for field in possible_fields:
         if item.get(field):
-            ocaids += item[field] if isinstance(item[field], list) else [item[field]]
+            val = cast(list[str] | str, item[field])
+            ocaids += val if isinstance(val, list) else [val]
     ocaids = uniq(ocaids)
     return next((ocaid for ocaid in ocaids if not is_non_ia_ocaid(ocaid)), None)
 
@@ -504,14 +513,37 @@ def get_availability_of_ocaid(ocaid):
     return get_availability('identifier', [ocaid])
 
 
-def get_availability_of_ocaids(ocaids: list[str]) -> dict:
+def get_availability_of_ocaids(ocaids: list[str]) -> dict[str, AvailabilityStatusV2]:
     """
     Retrieves availability based on ocaids/archive.org identifiers
     """
     return get_availability('identifier', ocaids)
 
 
-def is_loaned_out(identifier):
+def get_items_and_add_availability(ocaids: list[str]) -> dict[str, "Edition"]:
+    """
+    Get Editions from OCAIDs and attach their availabiliity.
+
+    Returns a dict of the form: `{"ocaid1": edition1, "ocaid2": edition2, ...}`
+    """
+    ocaid_availability = get_availability_of_ocaids(ocaids=ocaids)
+    editions = web.ctx.site.get_many(
+        [
+            f"/books/{item.get('openlibrary_edition')}"
+            for item in ocaid_availability.values()
+            if item.get('openlibrary_edition')
+        ]
+    )
+
+    # Attach availability
+    for edition in editions:
+        if edition.ocaid in ocaids:
+            edition.availability = ocaid_availability.get(edition.ocaid)
+
+    return {edition.ocaid: edition for edition in editions if edition.ocaid}
+
+
+def is_loaned_out(identifier: str) -> bool:
     """Returns True if the given identifier is loaned out.
 
     This doesn't worry about waiting lists.
@@ -522,17 +554,17 @@ def is_loaned_out(identifier):
     return (
         is_loaned_out_on_ol(identifier)
         or is_loaned_out_on_acs4(identifier)
-        or is_loaned_out_on_ia(identifier)
+        or (is_loaned_out_on_ia(identifier) is True)
     )
 
 
-def is_loaned_out_on_acs4(identifier):
+def is_loaned_out_on_acs4(identifier: str) -> bool:
     """Returns True if the item is checked out on acs4 server."""
     item = ACS4Item(identifier)
     return item.has_loan()
 
 
-def is_loaned_out_on_ia(identifier):
+def is_loaned_out_on_ia(identifier: str) -> bool | None:
     """Returns True if the item is checked out on Internet Archive."""
     url = "https://archive.org/services/borrow/%s?action=status" % identifier
     try:
@@ -543,7 +575,7 @@ def is_loaned_out_on_ia(identifier):
         return None
 
 
-def is_loaned_out_on_ol(identifier):
+def is_loaned_out_on_ol(identifier: str) -> bool:
     """Returns True if the item is checked out on Open Library."""
     loan = get_loan(identifier)
     return bool(loan)
@@ -585,7 +617,7 @@ def get_loan(identifier, user_key=None):
     return _loan
 
 
-def _get_ia_loan(identifier, userid):
+def _get_ia_loan(identifier: str, userid: str):
     ia_loan = ia_lending_api.get_loan(identifier, userid)
     return ia_loan and Loan.from_ia_loan(ia_loan)
 
@@ -623,13 +655,19 @@ def get_user_waiting_loans(user_key):
     """
     from .waitinglist import WaitingLoan
 
-    account = OpenLibraryAccount.get(key=user_key)
-    itemname = account.itemname
-    result = WaitingLoan.query(userid=itemname)
-    get_cached_user_waiting_loans.memcache_set(
-        [user_key], {}, result or {}, time.time()
-    )  # rehydrate cache
-    return result or []
+    if "site" not in web.ctx:
+        delegate.fakeload()
+
+    try:
+        account = OpenLibraryAccount.get(key=user_key)
+        itemname = account.itemname
+        result = WaitingLoan.query(userid=itemname)
+        get_cached_user_waiting_loans.memcache_set(
+            [user_key], {}, result or {}, time.time()
+        )  # rehydrate cache
+        return result or []
+    except JSONDecodeError as e:
+        return []
 
 
 get_cached_user_waiting_loans = cache.memcache_memoize(
@@ -842,9 +880,6 @@ class Loan(dict):
         # self['user'] will be None for IA loans
         return self['user'] is not None
 
-    def get_key(self):
-        return self['_key']
-
     def save(self):
         # loans stored at IA are not supposed to be saved at OL.
         # This call must have been made in mistake.
@@ -999,7 +1034,7 @@ class ACS4Item:
 class IA_Lending_API:
     """Archive.org waiting list API."""
 
-    def get_loan(self, identifier, userid=None):
+    def get_loan(self, identifier: str, userid: str | None = None):
         params = {'method': "loan.query", 'identifier': identifier}
         if userid:
             params['userid'] = userid
@@ -1007,7 +1042,10 @@ class IA_Lending_API:
             return loans[0]
 
     def find_loans(self, **kw):
-        return self._post(method="loan.query", **kw).get('result', [])
+        try:
+            return self._post(method="loan.query", **kw).get('result', [])
+        except JSONDecodeError as e:
+            return []
 
     def create_loan(self, identifier, userid, format, ol_key):
         response = self._post(
@@ -1065,6 +1103,9 @@ class IA_Lending_API:
             ).json()
             logger.info("POST response: %s", jsontext)
             return jsontext
+        except JSONDecodeError:
+            logger.exception("POST failed to openlibrary.php, no json")
+            return {}
         except Exception:  # TODO: Narrow exception scope
             logger.exception("POST failed")
             raise

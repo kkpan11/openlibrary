@@ -1,41 +1,36 @@
 """Handlers for adding and editing books."""
 
-import io
-import web
-import json
 import csv
 import datetime
+import io
+import json
+import logging
+import urllib
+from typing import Literal, NoReturn, overload
 
-from typing import Literal, overload, NoReturn
+import web
+from web.webapi import SeeOther
 
 from infogami import config
 from infogami.core.db import ValidationException
-from infogami.utils import delegate
-from infogami.utils.view import safeint, add_flash_message
 from infogami.infobase.client import ClientException
-
-from openlibrary.plugins.worksearch.search import get_solr
-from openlibrary.core.helpers import uniq
-from openlibrary.i18n import gettext as _
+from infogami.utils import delegate
+from infogami.utils.view import add_flash_message, safeint
 from openlibrary import accounts
-import logging
-
-from openlibrary.plugins.upstream import spamcheck, utils
-from openlibrary.plugins.upstream.models import Author, Edition, Work
-from openlibrary.plugins.upstream.utils import render_template, fuzzy_find
-
-from openlibrary.plugins.upstream.account import as_admin
+from openlibrary.core.helpers import uniq
+from openlibrary.i18n import gettext as _  # noqa: F401 side effects may be needed
 from openlibrary.plugins.recaptcha import recaptcha
-
-import urllib
-from web.webapi import SeeOther
-
+from openlibrary.plugins.upstream import spamcheck, utils
+from openlibrary.plugins.upstream.account import as_admin
+from openlibrary.plugins.upstream.models import Author, Edition, Work
+from openlibrary.plugins.upstream.utils import fuzzy_find, render_template
+from openlibrary.plugins.worksearch.search import get_solr
 
 logger = logging.getLogger("openlibrary.book")
 
 
 def get_recaptcha():
-    def recaptcha_exempt():
+    def recaptcha_exempt() -> bool:
         """Check to see if account is an admin, or more than two years old."""
         user = web.ctx.site.get_user()
         account = user and user.get_account()
@@ -51,7 +46,7 @@ def get_recaptcha():
         delta = now_dt - create_dt
         return delta.days > 30
 
-    def is_plugin_enabled(name):
+    def is_plugin_enabled(name) -> bool:
         plugin_names = delegate.get_plugins()
         return name in plugin_names or "openlibrary.plugins." + name in plugin_names
 
@@ -97,18 +92,15 @@ def make_work(doc: dict[str, str | list]) -> web.Storage:
 
 
 @overload
-def new_doc(type_: Literal["/type/author"], **data) -> Author:
-    ...
+def new_doc(type_: Literal["/type/author"], **data) -> Author: ...
 
 
 @overload
-def new_doc(type_: Literal["/type/edition"], **data) -> Edition:
-    ...
+def new_doc(type_: Literal["/type/edition"], **data) -> Edition: ...
 
 
 @overload
-def new_doc(type_: Literal["/type/work"], **data) -> Work:
-    ...
+def new_doc(type_: Literal["/type/work"], **data) -> Work: ...
 
 
 def new_doc(type_: str, **data) -> Author | Edition | Work:
@@ -129,13 +121,13 @@ class DocSaveHelper:
     def __init__(self):
         self.docs = []
 
-    def save(self, doc):
+    def save(self, doc) -> None:
         """Adds the doc to the list of docs to be saved."""
         if not isinstance(doc, dict):  # thing
             doc = doc.dict()
         self.docs.append(doc)
 
-    def commit(self, **kw):
+    def commit(self, **kw) -> None:
         """Saves all the collected docs."""
         if self.docs:
             web.ctx.site.save_many(self.docs, **kw)
@@ -172,7 +164,7 @@ def encode_url_path(url: str) -> str:
     '/'
     >>> encode_url_path('/books/OL11M/进入该海域?mode=add-work')
     '/books/OL11M/%E8%BF%9B%E5%85%A5%E8%AF%A5%E6%B5%B7%E5%9F%9F?mode=add-work'
-    """
+    """  # noqa: RUF002
     result = urllib.parse.urlparse(url)
     correct_path = "/".join(urllib.parse.quote(part) for part in result.path.split("/"))
     result = result._replace(path=correct_path)
@@ -561,10 +553,7 @@ class SaveBookHelper:
         user = accounts.get_current_user()
         delete = (
             user
-            and (
-                user.is_admin()
-                or user.is_usergroup_member('/usergroup/super-librarians')
-            )
+            and (user.is_admin() or user.is_super_librarian())
             and formdata.pop('_delete', '')
         )
 
@@ -606,8 +595,9 @@ class SaveBookHelper:
                 elif self.work is not None and new_work_key is None:
                     # we're trying to create an orphan; let's not do that
                     edition_data.works = [{'key': self.work.key}]
-
             if self.work is not None:
+                work_identifiers = work_data.pop('identifiers', {})
+                self.work.set_identifiers(work_identifiers)
                 self.work.update(work_data)
                 saveutil.save(self.work)
 
@@ -615,8 +605,33 @@ class SaveBookHelper:
             # Create a new work if so desired
             new_work_key = (edition_data.get('works') or [{'key': None}])[0]['key']
             if new_work_key == "__new__" and self.work is not None:
-                self.work = self.new_work(self.edition)
-                edition_data.works = [{'key': self.work.key}]
+                new_work = self.new_work(self.edition)
+                edition_data.works = [{'key': new_work.key}]
+
+                new_work_options = formdata.get(
+                    'new_work_options',
+                    {
+                        'copy_authors': 'no',
+                        'copy_subjects': 'no',
+                    },
+                )
+
+                if (
+                    new_work_options.get('copy_authors') == 'yes'
+                    and 'authors' in self.work
+                ):
+                    new_work.authors = self.work.authors
+                if new_work_options.get('copy_subjects') == 'yes':
+                    for field in (
+                        'subjects',
+                        'subject_places',
+                        'subject_times',
+                        'subject_people',
+                    ):
+                        if field in self.work:
+                            new_work[field] = self.work[field]
+
+                self.work = new_work
                 saveutil.save(self.work)
 
             identifiers = edition_data.pop('identifiers', [])
@@ -629,7 +644,7 @@ class SaveBookHelper:
                 edition_data.pop('physical_dimensions', None)
             )
             self.edition.set_weight(edition_data.pop('weight', None))
-            self.edition.set_toc_text(edition_data.pop('table_of_contents', ''))
+            self.edition.set_toc_text(edition_data.pop('table_of_contents', None))
 
             if edition_data.pop('translation', None) != 'yes':
                 edition_data.translation_of = None
@@ -660,8 +675,8 @@ class SaveBookHelper:
         doc = web.ctx.site.new(key, {"key": key, "type": {"key": "/type/delete"}})
         doc._save(comment=comment)
 
-    def process_new_fields(self, formdata):
-        def f(name):
+    def process_new_fields(self, formdata: dict):
+        def f(name: str):
             val = formdata.get(name)
             return val and json.loads(val)
 
@@ -768,8 +783,8 @@ class SaveBookHelper:
         else:
             work.subtitle = None
 
-        for k in ('excerpts', 'links'):
-            work[k] = work.get(k) or []
+        for k in ['excerpts', 'links', 'identifiers']:
+            work[k] = work.get(k, {})
 
         # ignore empty authors
         work.authors = [
@@ -780,12 +795,10 @@ class SaveBookHelper:
 
         return trim_doc(work)
 
-    def _prevent_ocaid_deletion(self, edition):
+    def _prevent_ocaid_deletion(self, edition) -> None:
         # Allow admins to modify ocaid
         user = accounts.get_current_user()
-        if user and (
-            user.is_admin() or user.is_usergroup_member('/usergroup/super-librarians')
-        ):
+        if user and (user.is_admin() or user.is_super_librarian()):
             return
 
         # read ocaid from form data
@@ -857,10 +870,8 @@ class book_edit(delegate.page):
             raise web.notfound()
 
         work = (
-            edition.works
-            and edition.works[0]
-            or edition.make_work_from_orphaned_edition()
-        )
+            edition.works and edition.works[0]
+        ) or edition.make_work_from_orphaned_edition()
 
         return render_template('books/edit', work, edition, recaptcha=get_recaptcha())
 

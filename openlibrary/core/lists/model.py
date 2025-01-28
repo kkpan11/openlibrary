@@ -1,30 +1,25 @@
 """Helper functions used by the List model.
 """
+
+import contextlib
+import logging
 from collections.abc import Iterable
 from functools import cached_property
 from typing import TypedDict, cast
 
 import web
-import logging
 
-from infogami import config
-from infogami.infobase import client, common
-from infogami.utils import stats
-
-from openlibrary.core import helpers as h
+from infogami import config  # noqa: F401 side effects may be needed
+from infogami.infobase import client, common  # noqa: F401 side effects may be needed
+from infogami.utils import stats  # noqa: F401 side effects may be needed
 from openlibrary.core import cache
-from openlibrary.core.models import Image, Subject, Thing, ThingKey
+from openlibrary.core import helpers as h
+from openlibrary.core.models import Image, Subject, Thing, ThingKey, ThingReferenceDict
 from openlibrary.plugins.upstream.models import Author, Changeset, Edition, User, Work
-
 from openlibrary.plugins.worksearch.search import get_solr
 from openlibrary.plugins.worksearch.subjects import get_subject
-import contextlib
 
 logger = logging.getLogger("openlibrary.lists.model")
-
-
-class ThingReferenceDict(TypedDict):
-    key: ThingKey
 
 
 SeedSubjectString = str
@@ -166,7 +161,7 @@ class List(Thing):
             "full_url": self.url(),
             "name": self.name or "",
             "seed_count": self.seed_count,
-            "last_update": self.last_update and self.last_update.isoformat() or None,
+            "last_update": (self.last_update and self.last_update.isoformat()) or None,
         }
 
     def get_work_keys(self) -> Iterable[ThingKey]:
@@ -203,7 +198,7 @@ class List(Thing):
         things = cast(
             list[Thing],
             web.ctx.site.get_many(
-                [seed.key for seed in self.seeds if isinstance(seed, Thing)]
+                [seed.key for seed in self.get_seeds() if seed._type != "subject"]
             ),
         )
 
@@ -320,7 +315,7 @@ class List(Thing):
         return d
 
     def get_seeds(self, sort=False, resolve_redirects=False) -> list['Seed']:
-        seeds: list['Seed'] = []
+        seeds: list[Seed] = []
         for s in self.seeds:
             seed = Seed.from_db(self, s)
             max_checks = 10
@@ -354,6 +349,38 @@ class List(Thing):
 
         cover_id = self._get_default_cover_id()
         return Image(self._site, 'b', cover_id)
+
+        # These functions cache and retrieve the 'my lists' section for mybooks.
+
+    @cache.memoize(
+        "memcache",
+        key=lambda self: 'core.patron_lists.%s' % web.safestr(self.key),
+        expires=60 * 10,
+    )
+    def get_patron_showcase(self, limit=3):
+        return self._get_uncached_patron_showcase(limit=limit)
+
+    def _get_uncached_patron_showcase(self, limit=3):
+        title = self.name or "Unnamed List"
+        n_covers = []
+        seeds = self.get_seeds()
+        for seed in seeds[:limit]:
+            if cover := seed.get_cover():
+                n_covers.append(cover.url("s"))
+            else:
+                n_covers.append(False)
+
+        last_modified = self.last_update
+        return {
+            'title': title,
+            'count': self.seed_count,
+            'covers': n_covers,
+            'last_mod': (
+                last_modified.isoformat(sep=' ', timespec="minutes")
+                if self.seed_count != 0
+                else ""
+            ),
+        }
 
 
 class Seed:
@@ -399,7 +426,9 @@ class Seed:
     def from_db(list: List, seed: Thing | SeedSubjectString) -> 'Seed':
         if isinstance(seed, str):
             return Seed(list, seed)
-        elif isinstance(seed, Thing):
+        # If there is a cache miss, `seed` is a client.Thing.
+        # See https://github.com/internetarchive/openlibrary/issues/8882#issuecomment-1983844076
+        elif isinstance(seed, Thing | client.Thing):
             if seed.key is None:
                 return Seed(list, cast(AnnotatedSeed, seed._data))
             else:
@@ -517,11 +546,10 @@ class Seed:
     def url(self):
         if self.document:
             return self.document.url()
+        elif self.key.startswith("subject:"):
+            return "/subjects/" + web.lstrips(self.key, "subject:")
         else:
-            if self.key.startswith("subject:"):
-                return "/subjects/" + web.lstrips(self.key, "subject:")
-            else:
-                return "/subjects/" + self.key
+            return "/subjects/" + self.key
 
     def get_subject_url(self, subject: SeedSubjectString) -> str:
         if subject.startswith("subject:"):
@@ -556,7 +584,7 @@ class Seed:
             "full_url": full_url,
             "type": self.type,
             "title": self.title,
-            "last_update": self.last_update and self.last_update.isoformat() or None,
+            "last_update": (self.last_update and self.last_update.isoformat()) or None,
         }
         if cover := self.get_cover():
             d['picture'] = {"url": cover.url("S")}

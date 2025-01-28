@@ -18,10 +18,9 @@ Functions with names other than the these will not be called from the
 main harness. They can be utility functions.
 
 """
+
 import functools
 import logging
-
-import web
 
 logger = logging.getLogger(__name__)
 

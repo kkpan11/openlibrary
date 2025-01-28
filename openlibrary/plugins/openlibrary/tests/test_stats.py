@@ -1,11 +1,13 @@
 """
 Tests the stats gathering systems.
 """
+
 import calendar
 import datetime
 
-from .. import stats
 from openlibrary.core.admin import Stats
+
+from .. import stats
 
 
 class MockDoc(dict):

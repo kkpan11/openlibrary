@@ -1,13 +1,14 @@
 """Various web.py application processors used in OL.
 """
+
 import logging
 import os
+import urllib
+
 import web
 
 from infogami.utils.view import render
 from openlibrary.core import helpers as h
-
-import urllib
 
 logger = logging.getLogger("openlibrary.readableurls")
 
@@ -34,6 +35,7 @@ class ReadableUrlProcessor:
         (r'/\w+/OL\d+A', '/type/author', 'name', 'noname'),
         (r'/\w+/OL\d+W', '/type/work', 'title', 'untitled'),
         (r'/[/\w\-]+/OL\d+L', '/type/list', 'name', 'unnamed'),
+        (r'/\w+/OL\d+T', '/type/tag', 'name', 'untitled'),
     ]
 
     def __call__(self, handler):
