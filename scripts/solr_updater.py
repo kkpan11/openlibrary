@@ -6,6 +6,7 @@ Changes:
 2013-02-25: First version
 2018-02-11: Use newer config method
 """
+
 import asyncio
 import datetime
 import json
@@ -14,18 +15,17 @@ import re
 import socket
 import sys
 import urllib
-
-from typing import Union
 from collections.abc import Iterator
+from pathlib import Path
 
-import _init_path  # Imported for its side effect of setting PYTHONPATH
-
+import _init_path  # noqa: F401 Imported for its side effect of setting PYTHONPATH
 import aiofiles
 import web
 
-from openlibrary.solr import update
-from openlibrary.config import load_config
 from infogami import config
+from openlibrary.config import load_config
+from openlibrary.solr import update
+from openlibrary.utils.open_syllabus_project import set_osp_dump_location
 
 logger = logging.getLogger("openlibrary.solr-updater")
 # FIXME: Some kind of hack introduced to work around DB connectivity issue
@@ -215,15 +215,10 @@ async def update_keys(keys):
         return 0
 
     # FIXME: Some kind of hack introduced to work around DB connectivity issue
-    global args
     logger.debug("Args: %s" % str(args))
     update.load_configs(args['ol_url'], args['ol_config'], 'default')
 
-    keys = [
-        k
-        for k in keys
-        if k.count("/") == 2 and k.split("/")[1] in ("books", "authors", "works")
-    ]
+    keys = [k for k in keys if update.can_update_key(k)]
 
     count = 0
     for chunk in web.group(keys, 100):
@@ -242,6 +237,7 @@ async def update_keys(keys):
 
 async def main(
     ol_config: str,
+    osp_dump: Path | None = None,
     debugger: bool = False,
     state_file: str = 'solr-update.state',
     exclude_edits_containing: str | None = None,
@@ -264,12 +260,12 @@ async def main(
     logger.info("BEGIN solr_updater")
 
     if debugger:
-        import debugpy
+        import debugpy  # noqa: T100
 
         logger.info("Enabling debugger attachment (attach if it hangs here)")
-        debugpy.listen(address=('0.0.0.0', 3000))
+        debugpy.listen(address=('0.0.0.0', 3000))  # noqa: T100
         logger.info("Waiting for debugger to attach...")
-        debugpy.wait_for_client()
+        debugpy.wait_for_client()  # noqa: T100
         logger.info("Debugger attached to port 3000")
 
     # Sometimes archive.org requests blocks forever.
@@ -285,6 +281,7 @@ async def main(
         update.set_solr_base_url(solr_url)
 
     update.set_solr_next(solr_next)
+    set_osp_dump_location(osp_dump)
 
     logger.info("loading config from %s", ol_config)
     load_config(ol_config)

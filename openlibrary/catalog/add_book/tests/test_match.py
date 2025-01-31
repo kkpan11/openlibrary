@@ -1,17 +1,19 @@
-import pytest
-
 from copy import deepcopy
+from types import MappingProxyType
+
+import pytest
 
 from openlibrary.catalog.add_book import load
 from openlibrary.catalog.add_book.match import (
+    THRESHOLD,
     add_db_name,
     build_titles,
     compare_authors,
     compare_publisher,
     editions_match,
     expand_record,
-    normalize,
     mk_norm,
+    normalize,
     threshold_match,
 )
 
@@ -65,7 +67,7 @@ titles = [
 ]
 
 
-@pytest.mark.parametrize('title,normalized', titles)
+@pytest.mark.parametrize(('title', 'normalized'), titles)
 def test_normalize(title, normalized):
     assert normalize(title) == normalized
 
@@ -80,7 +82,7 @@ mk_norm_conversions = [
 ]
 
 
-@pytest.mark.parametrize('title,expected', mk_norm_conversions)
+@pytest.mark.parametrize(('title', 'expected'), mk_norm_conversions)
 def test_mk_norm(title, expected):
     assert mk_norm(title) == expected
 
@@ -90,17 +92,19 @@ mk_norm_matches = [
 ]
 
 
-@pytest.mark.parametrize('a,b', mk_norm_matches)
+@pytest.mark.parametrize(('a', 'b'), mk_norm_matches)
 def test_mk_norm_equality(a, b):
     assert mk_norm(a) == mk_norm(b)
 
 
 class TestExpandRecord:
-    rec = {
-        'title': 'A test full title',
-        'subtitle': 'subtitle (parens).',
-        'source_records': ['ia:test-source'],
-    }
+    rec = MappingProxyType(
+        {
+            'title': 'A test full title',
+            'subtitle': 'subtitle (parens).',
+            'source_records': ['ia:test-source'],
+        }
+    )
 
     def test_expand_record(self):
         edition = self.rec.copy()
@@ -290,7 +294,7 @@ def test_compare_publisher():
     assert compare_publisher(foo, {}) == ('publisher', 'either missing', 0)
     assert compare_publisher({}, bar) == ('publisher', 'either missing', 0)
     assert compare_publisher(foo, foo2) == ('publisher', 'match', 100)
-    assert compare_publisher(foo, bar) == ('publisher', 'mismatch', -25)
+    assert compare_publisher(foo, bar) == ('publisher', 'mismatch', -51)
     assert compare_publisher(bar, both) == ('publisher', 'match', 100)
     assert compare_publisher(both, foo) == ('publisher', 'match', 100)
 
@@ -370,3 +374,53 @@ class TestRecordMatching:
         threshold = 515
         assert threshold_match(e1, e2, threshold) is True
         assert threshold_match(e1, e2, threshold + 1) is False
+
+    def test_matching_title_author_and_publish_year_but_not_publishers(self) -> None:
+        """
+        Matching only title, author, and publish_year should not be sufficient for
+        meeting the match threshold if the publisher is truthy and doesn't match,
+        as a book published in different publishers in the same year would easily meet
+        the criteria.
+        """
+        existing_edition = {
+            'authors': [{'name': 'Edgar Lee Masters'}],
+            'publish_date': '2022',
+            'publishers': ['Creative Media Partners, LLC'],
+            'title': 'Spoon River Anthology',
+        }
+
+        potential_match1 = {
+            'authors': [{'name': 'Edgar Lee Masters'}],
+            'publish_date': '2022',
+            'publishers': ['Standard Ebooks'],
+            'title': 'Spoon River Anthology',
+        }
+        assert threshold_match(existing_edition, potential_match1, THRESHOLD) is False
+
+        potential_match2 = {
+            'authors': [{'name': 'Edgar Lee Masters'}],
+            'publish_date': '2022',
+            'title': 'Spoon River Anthology',
+        }
+
+        # If there is no publisher and nothing else to match, the editions should be
+        # indistinguishable, and therefore matches.
+        assert threshold_match(existing_edition, potential_match2, THRESHOLD) is True
+
+    def test_noisbn_record_should_not_match_title_only(self):
+        # An existing light title + ISBN only record
+        existing_edition = {
+            # NO author
+            # NO date
+            #'publishers': ['Creative Media Partners, LLC'],
+            'title': 'Just A Title',
+            'isbn_13': ['9780000000002'],
+        }
+        potential_match = {
+            'authors': [{'name': 'Bob Smith'}],
+            'publish_date': '1913',
+            'publishers': ['Early Editions'],
+            'title': 'Just A Title',
+            'source_records': ['marc:somelibrary/some_marc.mrc'],
+        }
+        assert threshold_match(existing_edition, potential_match, THRESHOLD) is False

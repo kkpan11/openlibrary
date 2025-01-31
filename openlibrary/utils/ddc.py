@@ -6,10 +6,12 @@ Known issues
 ## Further Reading
 https://www.oclc.org/bibformats/en/0xx/082.html
 """
+
 from __future__ import annotations
+
 import re
-from string import printable
 from collections.abc import Iterable
+from string import printable
 
 MULTIPLE_SPACES_RE = re.compile(r'\s+')
 DDC_RE = re.compile(
@@ -41,7 +43,7 @@ def collapse_multiple_space(s: str) -> str:
     return MULTIPLE_SPACES_RE.sub(' ', s)
 
 
-VALID_CHARS = set(printable) - set("/'′’,")
+VALID_CHARS = set(printable) - set("/'′’,")  # noqa: RUF001
 
 
 def normalize_ddc(ddc: str) -> list[str]:

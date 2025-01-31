@@ -65,6 +65,7 @@ a.cta-btn {
     background-repeat: no-repeat;
     background-size: 20px;
     background-position: center right 8px;
+    justify-content: center;
   }
 
   &--unavailable {
@@ -72,6 +73,11 @@ a.cta-btn {
     color: @white;
     &:hover { background-color: darken(@primary-blue, 20%); }
   }
+
+  &--shell&--external {
+    background-blend-mode: difference;
+  }
+
   &--shell, &--shell:link, &--shell:visited {
     .shell-btn--active();
   }
@@ -128,6 +134,22 @@ a.cta-btn {
   }
 }
 
+// Button inside carousel
+.carousel-section .cta-btn {
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 14px;
+  text-align: center;
+
+  &.cta-btn--external {
+    padding-right: 25px;
+    // stylelint-disable-next-line selector-max-specificity
+    .btn-label {
+      padding: 8px 10px;
+    }
+  }
+}
+
 // Top margin to button coming after another button
 .cta-btn + form input.cta-btn, .cta-btn + .cta-btn {
   margin-top: 5px;
@@ -136,6 +158,15 @@ a.cta-btn {
 .cta-btn--small {
   font-size: 12px;
   padding: 5px 10px;
+}
+
+.cta-btn--search {
+  width: auto;
+  display: inline-block;
+  margin: 0;
+  border: 1px solid @dark-beige;
+  background-color: @light-beige;
+  color: @grey;
 }
 
 .waitinglist-message {

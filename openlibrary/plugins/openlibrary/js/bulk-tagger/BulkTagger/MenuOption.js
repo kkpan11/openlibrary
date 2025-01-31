@@ -5,7 +5,8 @@ const classTypeSuffixes = {
     subjects: '--subject',
     subject_people: '--person',
     subject_places: '--place',
-    subject_times: '--time'
+    subject_times: '--time',
+    collections: '--collection'
 }
 
 /**
@@ -174,5 +175,12 @@ export class MenuOption {
      */
     show() {
         this.rootElement.classList.remove('hidden')
+    }
+
+    /**
+     * Stages the selected menu option.
+     */
+    stage() {
+        this.rootElement.classList.add('selected-tag--staged');
     }
 }

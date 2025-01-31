@@ -4,12 +4,10 @@ from collections import defaultdict, namedtuple
 
 from infogami import config
 from infogami.utils.view import public
-from openlibrary import accounts
 from openlibrary.utils import extract_numeric_id_from_olid
 from openlibrary.utils.dateutil import DATE_ONE_MONTH_AGO, DATE_ONE_WEEK_AGO
 
-from . import cache
-from . import db
+from . import cache, db
 
 ObservationIds = namedtuple('ObservationIds', ['type_id', 'value_id'])
 ObservationKeyValue = namedtuple('ObservationKeyValue', ['key', 'value'])
@@ -578,7 +576,7 @@ def _get_deleted_types_and_values():
     results = {'types': [], 'values': defaultdict(list)}
 
     for o in OBSERVATIONS['observations']:
-        if 'deleted' in o and o['deleted']:
+        if o.get('deleted'):
             results['types'].append(o['id'])
         else:
             for v in o['values']:
@@ -747,13 +745,13 @@ def get_observation_metrics(work_olid):
 class Observations(db.CommonExtras):
     TABLENAME = "observations"
     NULL_EDITION_VALUE = -1
-    PRIMARY_KEY = [
+    PRIMARY_KEY = (
         "work_id",
         "edition_id",
         "username",
         "observation_value",
         "observation_type",
-    ]
+    )
     ALLOW_DELETE_ON_CONFLICT = True
 
     @classmethod

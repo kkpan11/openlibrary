@@ -1,33 +1,34 @@
 """Lists implementation.
 """
-from dataclasses import dataclass, field
+
 import json
-from urllib.parse import parse_qs
 import random
+from dataclasses import dataclass, field
 from typing import Literal, cast
+from urllib.parse import parse_qs
+
 import web
 
-from infogami.utils import delegate
-from infogami.utils.view import render_template, public
+import openlibrary.core.helpers as h
 from infogami.infobase import client, common
-
+from infogami.utils import delegate
+from infogami.utils.view import public, render_template, require_login
 from openlibrary.accounts import get_current_user
-from openlibrary.core import formats, cache
-from openlibrary.core.models import ThingKey
+from openlibrary.core import cache, formats
 from openlibrary.core.lists.model import (
     AnnotatedSeedDict,
     List,
-    ThingReferenceDict,
     SeedSubjectString,
+    ThingReferenceDict,
 )
-import openlibrary.core.helpers as h
+from openlibrary.core.models import ThingKey
+from openlibrary.coverstore.code import render_list_preview_image
 from openlibrary.i18n import gettext as _
-from openlibrary.plugins.upstream.addbook import safe_seeother
-from openlibrary.utils import dateutil, olid_to_key
 from openlibrary.plugins.upstream import spamcheck, utils
 from openlibrary.plugins.upstream.account import MyBooksTemplate
+from openlibrary.plugins.upstream.addbook import safe_seeother
 from openlibrary.plugins.worksearch import subjects
-from openlibrary.coverstore.code import render_list_preview_image
+from openlibrary.utils import olid_to_key
 
 
 def subject_key_to_seed(key: subjects.SubjectPseudoKey) -> SeedSubjectString:
@@ -77,21 +78,20 @@ class ListRecord:
                 return seed
             else:
                 return {'key': olid_to_key(seed)}
-        else:
-            if 'thing' in seed:
-                annotated_seed = cast(AnnotatedSeedDict, seed)  # Appease mypy
+        elif 'thing' in seed:
+            annotated_seed = cast(AnnotatedSeedDict, seed)  # Appease mypy
 
-                if is_empty_annotated_seed(annotated_seed):
-                    return ListRecord.normalize_input_seed(annotated_seed['thing'])
-                elif annotated_seed['thing']['key'].startswith('/subjects/'):
-                    return subject_key_to_seed(annotated_seed['thing']['key'])
-                else:
-                    return annotated_seed
-            elif seed['key'].startswith('/subjects/'):
-                thing_ref = cast(ThingReferenceDict, seed)  # Appease mypy
-                return subject_key_to_seed(thing_ref['key'])
+            if is_empty_annotated_seed(annotated_seed):
+                return ListRecord.normalize_input_seed(annotated_seed['thing'])
+            elif annotated_seed['thing']['key'].startswith('/subjects/'):
+                return subject_key_to_seed(annotated_seed['thing']['key'])
             else:
-                return seed
+                return annotated_seed
+        elif seed['key'].startswith('/subjects/'):
+            thing_ref = cast(ThingReferenceDict, seed)  # Appease mypy
+            return subject_key_to_seed(thing_ref['key'])
+        else:
+            return seed
 
     @staticmethod
     def from_input():
@@ -213,7 +213,9 @@ def get_list_data(list, seed, include_cover_url=True):
     )
     if include_cover_url:
         cover = list.get_cover() or list.get_default_cover()
-        d['cover_url'] = cover and cover.url("S") or "/images/icons/avatar_book-sm.png"
+        d['cover_url'] = (
+            cover and cover.url("S")
+        ) or "/images/icons/avatar_book-sm.png"
         if 'None' in d['cover_url']:
             d['cover_url'] = "/images/icons/avatar_book-sm.png"
 
@@ -238,8 +240,6 @@ class lists_partials(delegate.page):
     encoding = "json"
 
     def GET(self):
-        i = web.input(key=None)
-
         partials = self.get_partials()
         return delegate.RawText(json.dumps(partials))
 
@@ -354,6 +354,14 @@ class lists_edit(delegate.page):
             return safe_seeother(list_record.key)
 
 
+class lists_add_account(delegate.page):
+    path = r"/account/lists/add"
+
+    @require_login
+    def GET(self):
+        return web.seeother(f'{get_current_user().key}/lists/add{web.ctx.query}')
+
+
 class lists_add(delegate.page):
     path = r"(/people/[^/]+)?/lists/add"
 
@@ -383,6 +391,10 @@ class lists_delete(delegate.page):
         doc = web.ctx.site.get(key)
         if doc is None or doc.type.key != '/type/list':
             raise web.notfound()
+
+        # Deletes list preview from memcache, if it exists
+        cache_key = "core.patron_lists.%s" % web.safestr(doc.key)
+        cache.memcache_cache.delete(cache_key)
 
         doc = {"key": key, "type": {"key": "/type/delete"}}
         try:
@@ -524,7 +536,7 @@ def get_list(key, raw=False):
             },
             "name": lst.name or None,
             "type": {"key": lst.key},
-            "description": (lst.description and str(lst.description) or None),
+            "description": ((lst.description and str(lst.description)) or None),
             "seed_count": lst.seed_count,
             "meta": {
                 "revision": lst.revision,

@@ -1,72 +1,107 @@
-from datetime import datetime
 import json
 import logging
-import re
-from typing import Any
-from collections.abc import Callable
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
+from datetime import datetime
+from math import ceil
+from typing import TYPE_CHECKING, Any, Final
+from urllib.parse import urlparse
 
+import requests
 import web
 
-from infogami.utils import delegate
+import infogami.core.code as core  # noqa: F401 side effects may be needed
 from infogami import config
+from infogami.infobase.client import ClientException
+from infogami.utils import delegate
 from infogami.utils.view import (
-    require_login,
+    add_flash_message,
     render,
     render_template,
-    add_flash_message,
+    require_login,
 )
-from infogami.infobase.client import ClientException
-import infogami.core.code as core
-
 from openlibrary import accounts
-from openlibrary.i18n import gettext as _
-from openlibrary.core import stats
-from openlibrary.core import helpers as h, lending
+from openlibrary.accounts import (
+    InternetArchiveAccount,
+    OLAuthenticationError,
+    OpenLibraryAccount,
+    audit_accounts,
+    clear_cookies,
+    valid_email,
+)
+from openlibrary.core import helpers as h
+from openlibrary.core import lending, stats
 from openlibrary.core.booknotes import Booknotes
 from openlibrary.core.bookshelves import Bookshelves
+from openlibrary.core.follows import PubSub
+from openlibrary.core.lending import (
+    get_items_and_add_availability,
+    s3_loan_api,
+)
 from openlibrary.core.observations import Observations
 from openlibrary.core.ratings import Ratings
-from openlibrary.plugins.recaptcha import recaptcha
-from openlibrary.plugins.upstream.mybooks import MyBooksTemplate
+from openlibrary.i18n import gettext as _
 from openlibrary.plugins import openlibrary as olib
-from openlibrary.accounts import (
-    audit_accounts,
-    Account,
-    OpenLibraryAccount,
-    InternetArchiveAccount,
-    valid_email,
-    clear_cookies,
-)
+from openlibrary.plugins.recaptcha import recaptcha
 from openlibrary.plugins.upstream import borrow, forms, utils
+from openlibrary.plugins.upstream.mybooks import MyBooksTemplate
 from openlibrary.utils.dateutil import elapsed_time
+
+if TYPE_CHECKING:
+    from openlibrary.plugins.upstream.models import Work
 
 logger = logging.getLogger("openlibrary.account")
 
+CONFIG_IA_DOMAIN: Final = config.get('ia_base_url', 'https://archive.org')
 USERNAME_RETRIES = 3
+RESULTS_PER_PAGE: Final = 25
 
 # XXX: These need to be cleaned up
 send_verification_email = accounts.send_verification_email
 create_link_doc = accounts.create_link_doc
 sendmail = accounts.sendmail
 
-LOGIN_ERRORS = {
-    "invalid_email": "The email address you entered is invalid",
-    "account_blocked": "This account has been blocked",
-    "account_locked": "This account has been blocked",
-    "account_not_found": "No account was found with this email. Please try again",
-    "account_incorrect_password": "The password you entered is incorrect. Please try again",
-    "account_bad_password": "Wrong password. Please try again",
-    "account_not_verified": "Please verify your Open Library account before logging in",
-    "ia_account_not_verified": "Please verify your Internet Archive account before logging in",
-    "missing_fields": "Please fill out all fields and try again",
-    "email_registered": "This email is already registered",
-    "username_registered": "This username is already registered",
-    "ia_login_only": "Sorry, you must use your Internet Archive email and password to log in",
-    "max_retries_exceeded": "A problem occurred and we were unable to log you in.",
-    "invalid_s3keys": "Login attempted with invalid Internet Archive s3 credentials.",
-    "wrong_ia_account": "An Open Library account with this email is already linked to a different Internet Archive account. Please contact info@openlibrary.org.",
-}
+
+def get_login_error(error_key):
+    """Nesting the LOGIN_ERRORS dictionary inside a function prevents
+    an AttributeError with the web.ctx.lang library"""
+    LOGIN_ERRORS = {
+        "invalid_email": _('The email address you entered is invalid'),
+        "account_blocked": _('This account has been blocked'),
+        "account_locked": _('This account has been locked'),
+        "account_not_found": _(
+            'No account was found with this email. Please try again'
+        ),
+        "account_incorrect_password": _(
+            'The password you entered is incorrect. Please try again'
+        ),
+        "account_bad_password": _('Wrong password. Please try again'),
+        "account_not_verified": _(
+            'Please verify your Open Library account before logging in'
+        ),
+        "ia_account_not_verified": _(
+            'Please verify your Internet Archive account before logging in'
+        ),
+        "missing_fields": _('Please fill out all fields and try again'),
+        "email_registered": _('This email is already registered'),
+        "username_registered": _('This username is already registered'),
+        "max_retries_exceeded": _(
+            'A problem occurred and we were unable to log you in.'
+        ),
+        "invalid_s3keys": _(
+            'Login attempted with invalid Internet Archive s3 credentials.'
+        ),
+        "request_timeout": _(
+            "Servers are experiencing unusually high traffic, please try again later or email openlibrary@archive.org for help."
+        ),
+        "bad_email": _("Email provider not recognized."),
+        "bad_password": _("Password requirements not met."),
+        "undefined_error": _('A problem occurred and we were unable to log you in'),
+    }
+    return (
+        LOGIN_ERRORS[error_key]
+        if error_key in LOGIN_ERRORS
+        else _("Request failed with error code: %(error_code)s", error_code=error_key)
+    )
 
 
 class availability(delegate.page):
@@ -294,8 +329,13 @@ class account_create(delegate.page):
                 return render['account/verify'](
                     username=f.username.value, email=f.email.value
                 )
-            except ValueError:
-                f.note = LOGIN_ERRORS['max_retries_exceeded']
+            except OLAuthenticationError as e:
+                f.note = get_login_error(e.__str__())
+                from openlibrary.plugins.openlibrary.sentry import sentry
+
+                if sentry.enabled:
+                    extra = {'response': e.response} if hasattr(e, 'response') else None
+                    sentry.capture_exception(e, extras=extra)
 
         return render['account/create'](f)
 
@@ -313,7 +353,9 @@ class account_login_json(delegate.page):
         payload is json. Instead, if login attempted w/ json
         credentials, requires Archive.org s3 keys.
         """
-        from openlibrary.plugins.openlibrary.code import BadRequest
+        from openlibrary.plugins.openlibrary.code import (
+            BadRequest,  # noqa: F401 side effects may be needed
+        )
 
         d = json.loads(web.data())
         email = d.get('email', "")
@@ -334,13 +376,26 @@ class account_login_json(delegate.page):
             )
             error = audit.get('error')
             if error:
-                raise olib.code.BadRequest(error)
+                resp = {
+                    'error': error,
+                    'errorDisplayString': get_login_error(error),
+                }
+                raise olib.code.BadRequest(json.dumps(resp))
             expires = 3600 * 24 * 365 if remember.lower() == 'true' else ""
             web.setcookie(config.login_cookie_name, web.ctx.conn.get_auth_token())
             if audit.get('ia_email'):
                 ol_account = OpenLibraryAccount.get(email=audit['ia_email'])
                 if ol_account and ol_account.get_user().get_safe_mode() == 'yes':
                     web.setcookie('sfw', 'yes', expires=expires)
+                if (
+                    ol_account
+                    and 'yrg_banner_pref' in ol_account.get_user().preferences()
+                ):
+                    web.setcookie(
+                        ol_account.get_user().preferences()['yrg_banner_pref'],
+                        '1',
+                        expires=(3600 * 24 * 365),
+                    )
         # Fallback to infogami user/pass
         else:
             from infogami.plugins.api.code import login as infogami_login
@@ -363,13 +418,18 @@ class account_login(delegate.page):
     def render_error(self, error_key, i):
         f = forms.Login()
         f.fill(i)
-        f.note = LOGIN_ERRORS[error_key]
+        f.note = get_login_error(error_key)
         return render.login(f)
 
     def GET(self):
         referer = web.ctx.env.get('HTTP_REFERER', '')
         # Don't set referer if request is from offsite
-        if 'openlibrary.org' not in referer or referer.endswith('openlibrary.org/'):
+        parsed_referer = urlparse(referer)
+        this_host = web.ctx.host
+        if ':' in this_host:
+            # Remove port number
+            this_host = this_host.split(':', 1)[0]
+        if parsed_referer.hostname != this_host:
             referer = None
         i = web.input(redirect=referer)
         f = forms.Login()
@@ -407,6 +467,12 @@ class account_login(delegate.page):
         ol_account = OpenLibraryAccount.get(email=email)
         if ol_account and ol_account.get_user().get_safe_mode() == 'yes':
             web.setcookie('sfw', 'yes', expires=expires)
+        if ol_account and 'yrg_banner_pref' in ol_account.get_user().preferences():
+            web.setcookie(
+                ol_account.get_user().preferences()['yrg_banner_pref'],
+                '1',
+                expires=(3600 * 24 * 365),
+            )
         blacklist = [
             "/account/login",
             "/account/create",
@@ -508,23 +574,32 @@ class account_validation(delegate.page):
     path = '/account/validate'
 
     @staticmethod
+    def ia_username_exists(username):
+        url = "https://archive.org/metadata/@%s" % username
+        try:
+            return bool(requests.get(url).json())
+        except (OSError, ValueError):
+            return
+
+    @staticmethod
     def validate_username(username):
-        if not 3 <= len(username) <= 20:
-            return _('Username must be between 3-20 characters')
-        if not re.match('^[A-Za-z0-9-_]{3,20}$', username):
-            return _('Username may only contain numbers and letters')
         ol_account = OpenLibraryAccount.get(username=username)
         if ol_account:
             return _("Username unavailable")
 
+        ia_account = account_validation.ia_username_exists(username)
+        if ia_account:
+            return _("Username unavailable")
+
     @staticmethod
     def validate_email(email):
-        if not (email and re.match(r'.*@.*\..*', email)):
-            return _('Must be a valid email address')
-
         ol_account = OpenLibraryAccount.get(email=email)
         if ol_account:
             return _('Email already registered')
+
+        ia_account = InternetArchiveAccount.get(email=email)
+        if ia_account:
+            return _('An Internet Archive account already exists with this email')
 
     def GET(self):
         i = web.input()
@@ -609,32 +684,6 @@ class account_ia_email_forgot(delegate.page):
         else:
             err = "Please enter a valid Open Library email"
         return render_template('account/email/forgot-ia', err=err)
-
-
-class account_ol_email_forgot(delegate.page):
-    path = "/account/email/forgot"
-
-    def GET(self):
-        return render_template('account/email/forgot')
-
-    def POST(self):
-        i = web.input(username='', password='')
-        err = ""
-        act = OpenLibraryAccount.get(username=i.username)
-
-        if act:
-            if OpenLibraryAccount.authenticate(act.email, i.password) == "ok":
-                return render_template('account/email/forgot', email=act.email)
-            else:
-                err = "Incorrect password"
-
-        elif valid_email(i.username):
-            err = "Please enter a username, not an email"
-
-        else:
-            err = "Sorry, this user does not exist"
-
-        return render_template('account/email/forgot', err=err)
 
 
 class account_password_forgot(delegate.page):
@@ -725,7 +774,10 @@ class account_privacy(delegate.page):
         user = accounts.get_current_user()
         if user.get_safe_mode() != 'yes' and i.safe_mode == 'yes':
             stats.increment('ol.account.safe_mode')
+
         user.save_preferences(i)
+        username = user.key.split('/')[-1]
+        PubSub.toggle_privacy(username, private=i.public_readlog == 'no')
         web.setcookie(
             'sfw', i.safe_mode, expires="" if i.safe_mode.lower() == 'yes' else -1
         )
@@ -783,29 +835,6 @@ class account_my_books(delegate.page):
         user = accounts.get_current_user()
         username = user.key.split('/')[-1]
         raise web.seeother(f'/people/{username}/books')
-
-
-# This would be by the civi backend which would require the api keys
-class fake_civi(delegate.page):
-    path = "/internal/fake/civicrm"
-
-    def GET(self):
-        i = web.input(entity='Contact')
-        contact = {'values': [{'contact_id': '270430'}]}
-        contributions = {
-            'values': [
-                {
-                    "receive_date": "2019-07-31 08:57:00",
-                    "custom_52": "9780062457714",
-                    "total_amount": "50.00",
-                    "custom_53": "ol",
-                    "contact_id": "270430",
-                    "contribution_status": "",
-                }
-            ]
-        }
-        entity = contributions if i.entity == 'Contribution' else contact
-        return delegate.RawText(json.dumps(entity), content_type="application/json")
 
 
 class import_books(delegate.page):
@@ -881,7 +910,6 @@ def csv_string(source: Iterable[Mapping], row_formatter: Callable | None = None)
 
 class export_books(delegate.page):
     path = "/account/export"
-
     date_format = '%Y-%m-%d %H:%M:%S'
 
     @require_login
@@ -915,46 +943,52 @@ class export_books(delegate.page):
         web.header('Content-disposition', f'attachment; filename={filename}')
         return delegate.RawText('' or data, content_type="text/csv")
 
-    def generate_reading_log(self, username: str) -> str:
-        from openlibrary.plugins.upstream.models import Work  # Avoid a circular import
+    def escape_csv_field(self, raw_string: str) -> str:
+        """
+        Formats given CSV field string such that it conforms to definition outlined
+        in RFC #4180.
 
+        Note: We should probably use
+        https://docs.python.org/3/library/csv.html
+        """
+        escaped_string = raw_string.replace('"', '""')
+        return f'"{escaped_string}"'
+
+    def get_work_from_id(self, work_id: str) -> "Work":
+        """
+        Gets work data for a given work ID (OLxxxxxW format), used to access work author, title, etc. for CSV generation.
+        """
+        work_key = f"/works/{work_id}"
+        work: Work = web.ctx.site.get(work_key)
+        if not work:
+            raise ValueError(f"No Work found for {work_key}.")
+        if work.type.key == '/type/redirect':
+            # Fetch actual work and resolve redirects before exporting:
+            work = web.ctx.site.get(work.location)
+            work.resolve_redirect_chain(work_key)
+        return work
+
+    def generate_reading_log(self, username: str) -> str:
         bookshelf_map = {1: 'Want to Read', 2: 'Currently Reading', 3: 'Already Read'}
 
-        def get_subjects(work: Work, subject_type: str) -> str:
+        def get_subjects(work: "Work", subject_type: str) -> str:
             return " | ".join(s.title for s in work.get_subject_links(subject_type))
-
-        def escape_csv_field(raw_string: str) -> str:
-            """
-            Formats given CVS field string such that it conforms to definition outlined
-            in RFC #4180.
-
-            Note: We should probably use
-            https://docs.python.org/3/library/csv.html
-            """
-            escaped_string = raw_string.replace('"', '""')
-            return f'"{escaped_string}"'
 
         def format_reading_log(book: dict) -> dict:
             """
             Adding, deleting, renaming, or reordering the fields of the dict returned
             below will automatically be reflected in the CSV that is generated.
             """
-            work_key = f"/works/OL{book['work_id']}W"
-            work: Work = web.ctx.site.get(work_key)
-            if not work:
-                raise ValueError(f"No Work found for {work_key}.")
-            if work.type.key == '/type/redirect':
-                # Fetch actual work and resolve redirects before exporting:
-                work = web.ctx.site.get(work.location)
-                work.resolve_redirect_chain(work_key)
+            work_id = f"OL{book['work_id']}W"
             if edition_id := book.get("edition_id") or "":
                 edition_id = f"OL{edition_id}M"
+            work = self.get_work_from_id(work_id)
             ratings = work.get_rating_stats() or {"average": "", "count": ""}
             ratings_average, ratings_count = ratings.values()
             return {
-                "work_id": work_key.split("/")[-1],
-                "title": escape_csv_field(work.title),
-                "authors": escape_csv_field(" | ".join(work.get_author_names())),
+                "work_id": work_id,
+                "title": self.escape_csv_field(work.title),
+                "authors": self.escape_csv_field(" | ".join(work.get_author_names())),
                 "first_publish_year": work.first_publish_year,
                 "edition_id": edition_id,
                 "edition_count": work.edition_count,
@@ -963,16 +997,16 @@ class export_books(delegate.page):
                 "ratings_average": ratings_average,
                 "ratings_count": ratings_count,
                 "has_ebook": work.has_ebook(),
-                "subjects": escape_csv_field(
+                "subjects": self.escape_csv_field(
                     get_subjects(work=work, subject_type="subject")
                 ),
-                "subject_people": escape_csv_field(
+                "subject_people": self.escape_csv_field(
                     get_subjects(work=work, subject_type="person")
                 ),
-                "subject_places": escape_csv_field(
+                "subject_places": self.escape_csv_field(
                     get_subjects(work=work, subject_type="place")
                 ),
-                "subject_times": escape_csv_field(
+                "subject_times": self.escape_csv_field(
                     get_subjects(work=work, subject_type="time")
                 ),
             }
@@ -1035,17 +1069,63 @@ class export_books(delegate.page):
         return "\n".join(lists_as_csv(lists))
 
     def generate_star_ratings(self, username: str) -> str:
+
         def format_rating(rating: Mapping) -> dict:
+            work_id = f"OL{rating['work_id']}W"
             if edition_id := rating.get("edition_id") or "":
                 edition_id = f"OL{edition_id}M"
+            work = self.get_work_from_id(work_id)
             return {
-                "Work ID": f"OL{rating['work_id']}W",
+                "Work ID": work_id,
                 "Edition ID": edition_id,
+                "Title": self.escape_csv_field(work.title),
+                "Author(s)": self.escape_csv_field(" | ".join(work.get_author_names())),
                 "Rating": f"{rating['rating']}",
                 "Created On": rating['created'].strftime(self.date_format),
             }
 
         return csv_string(Ratings.select_all_by_username(username), format_rating)
+
+
+def _validate_follows_page(page, per_page, hits):
+    min_page = 1
+    max_page = max(min_page, ceil(hits / per_page))
+    if isinstance(page, int):
+        return min(max_page, max(min_page, page))
+    if isinstance(page, str) and page.isdigit():
+        return min(max_page, max(min_page, int(page)))
+    return min_page
+
+
+class my_follows(delegate.page):
+    path = r"/people/([^/]+)/(followers|following)"
+
+    def GET(self, username, key=""):
+        page_size = 25
+        i = web.input(page=1)
+
+        # Validate page ID, force between 1 and max allowed by size and total count
+        follow_count = (
+            PubSub.count_followers(username)
+            if key == 'followers'
+            else PubSub.count_following(username)
+        )
+        page = _validate_follows_page(i.page, page_size, follow_count)
+
+        # Get slice of follows belonging to this page
+        offset = max(0, (page - 1) * page_size)
+        follows = (
+            PubSub.get_followers(username, page_size, offset)
+            if key == 'followers'
+            else PubSub.get_following(username, page_size, offset)
+        )
+
+        mb = MyBooksTemplate(username, 'following')
+        manage = key == 'following' and mb.is_my_page
+        template = render['account/follows'](
+            mb.user, follow_count, page, page_size, follows, manage=manage
+        )
+        return mb.render(header_title=_(key.capitalize()), template=template)
 
 
 class account_loans(delegate.page):
@@ -1077,6 +1157,48 @@ class account_loans_json(delegate.page):
         return delegate.RawText(json.dumps({"loans": loans}))
 
 
+class account_loan_history(delegate.page):
+    path = "/account/loan-history"
+
+    @require_login
+    def GET(self):
+        i = web.input(page=1)
+        page = int(i.page)
+        user = accounts.get_current_user()
+        username = user['key'].split('/')[-1]
+        mb = MyBooksTemplate(username, key='loan_history')
+        loan_history_data = get_loan_history_data(page=page, mb=mb)
+        template = render['account/loan_history'](
+            docs=loan_history_data['docs'],
+            current_page=page,
+            show_next=loan_history_data['show_next'],
+            ia_base_url=CONFIG_IA_DOMAIN,
+        )
+        return mb.render(header_title=_("Loan History"), template=template)
+
+
+class account_loan_history_json(delegate.page):
+    encoding = "json"
+    path = "/account/loan-history"
+
+    @require_login
+    def GET(self):
+        i = web.input(page=1)
+        page = int(i.page)
+        user = accounts.get_current_user()
+        username = user['key'].split('/')[-1]
+        mb = MyBooksTemplate(username, key='loan_history')
+        loan_history_data = get_loan_history_data(page=page, mb=mb)
+        # Ensure all `docs` are `dicts`, as some are `Edition`s.
+        loan_history_data['docs'] = [
+            loan.dict() if not isinstance(loan, dict) else loan
+            for loan in loan_history_data['docs']
+        ]
+        web.header('Content-Type', 'application/json')
+
+        return delegate.RawText(json.dumps({"loans_history": loan_history_data}))
+
+
 class account_waitlist(delegate.page):
     path = "/account/waitlist"
 
@@ -1094,7 +1216,7 @@ class account_waitlist(delegate.page):
 #         return render.notfound(path, create=False)
 
 
-def send_forgot_password_email(username, email):
+def send_forgot_password_email(username: str, email: str) -> None:
     key = f"account/{username}/password"
 
     doc = create_link_doc(key, username, email)
@@ -1140,3 +1262,75 @@ def process_goodreads_csv(i):
         else:
             books_wo_isbns[_book['Book Id']] = _book
     return books, books_wo_isbns
+
+
+def get_loan_history_data(page: int, mb: "MyBooksTemplate") -> dict[str, Any]:
+    """
+    Retrieve IA loan history data for page `page` of the patron's history.
+
+    This will use a patron's S3 keys to query the IA loan history API,
+    get the IA IDs, get the OLIDs if available, and and then convert this
+    into editions and IA-only items for display in the loan history.
+
+    This returns both editions and IA-only items because the loan history API
+    includes items that are not in Open Library, and displaying only IA
+    items creates pagination and navigation issues. For further discussion,
+    see https://github.com/internetarchive/openlibrary/pull/8375.
+    """
+    if not (account := OpenLibraryAccount.get(username=mb.username)):
+        raise render.notfound(
+            "Account for not found for %s" % mb.username, create=False
+        )
+    s3_keys = web.ctx.site.store.get(account._key).get('s3_keys')
+    limit = RESULTS_PER_PAGE
+    offset = page * limit - limit
+    loan_history = s3_loan_api(
+        s3_keys=s3_keys,
+        action='user_borrow_history',
+        limit=limit + 1,
+        offset=offset,
+        newest=True,
+    ).json()['history']['items']
+
+    # We request limit+1 to see if there is another page of history to display,
+    # and then pop the +1 off if it's present.
+    show_next = len(loan_history) == limit + 1
+    if show_next:
+        loan_history.pop()
+
+    ocaids = [loan_record['identifier'] for loan_record in loan_history]
+    loan_history_map = {
+        loan_record['identifier']: loan_record for loan_record in loan_history
+    }
+
+    # Get editions and attach their loan history.
+    editions_map = get_items_and_add_availability(ocaids=ocaids)
+    for edition in editions_map.values():
+        edition_loan_history = loan_history_map.get(edition.get('ocaid'))
+        edition['last_loan_date'] = (
+            edition_loan_history.get('updatedate') if edition_loan_history else ''
+        )
+
+    # Create 'placeholders' dicts for items in the Internet Archive loan history,
+    # but absent from Open Library, and then add loan history.
+    # ia_only['loan'] isn't set because `LoanStatus.html` reads it as a current
+    # loan. No apparently way to distinguish between current and past loans with
+    # this API call.
+    ia_only_loans = [{'ocaid': ocaid} for ocaid in ocaids if ocaid not in editions_map]
+    for ia_only_loan in ia_only_loans:
+        loan_data = loan_history_map[ia_only_loan['ocaid']]
+        ia_only_loan['last_loan_date'] = loan_data.get('updatedate', '')
+        # Determine the macro to load for loan-history items only.
+        ia_only_loan['ia_only'] = True  # type: ignore[typeddict-unknown-key]
+
+    editions_and_ia_loans = list(editions_map.values()) + ia_only_loans
+    editions_and_ia_loans.sort(
+        key=lambda item: item.get('last_loan_date', ''), reverse=True
+    )
+
+    return {
+        'docs': editions_and_ia_loans,
+        'show_next': show_next,
+        'limit': limit,
+        'page': page,
+    }

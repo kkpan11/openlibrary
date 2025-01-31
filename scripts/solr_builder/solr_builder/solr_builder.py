@@ -7,6 +7,7 @@ import uuid
 from collections import namedtuple
 from collections.abc import Awaitable, Iterator
 from configparser import ConfigParser
+from pathlib import Path
 from typing import Any, Literal, Self
 
 import aiofiles
@@ -17,6 +18,7 @@ from openlibrary.core.ratings import Ratings, WorkRatingsSummary
 from openlibrary.solr import update
 from openlibrary.solr.data_provider import DataProvider, WorkReadingLogSolrSummary
 from openlibrary.solr.update import load_configs, update_keys
+from openlibrary.utils.open_syllabus_project import set_osp_dump_location
 
 logger = logging.getLogger("openlibrary.solr-builder")
 
@@ -376,6 +378,7 @@ def build_job_query(
 async def main(
     cmd: Literal['index', 'fetch-end'],
     job: Literal['works', 'orphans', 'authors', 'lists'],
+    osp_dump: Path | None = None,
     postgres="postgres.ini",
     ol="http://ol/",
     ol_config="../../conf/openlibrary.yml",
@@ -413,6 +416,8 @@ async def main(
 
     if solr:
         update.set_solr_base_url(solr)
+
+    set_osp_dump_location(osp_dump)
 
     PLogEntry = namedtuple(
         'PLogEntry',
